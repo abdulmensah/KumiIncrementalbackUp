@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Threading.Tasks;
+using Serilog;
 
 namespace KumiIncrementalbackUp.Services
 {
@@ -43,28 +44,40 @@ namespace KumiIncrementalbackUp.Services
                     try
                     {
                         var fileInfo = new FileInfo(filePath);
+                        var lastAccess = new DateTime();
+                        try
+                        {
+                            //Not important if this succeeds
+                            lastAccess = fileInfo.LastWriteTimeUtc;
+                        }
+                        catch
+                        {
+                            Log.Warning("Could not read last write time for file {FilePath}.", filePath);
+                        }
+
                         if (!fileInfo.Exists || IsHiddenOrSystem(fileInfo.Attributes))
                         {
                             continue;
                         }
 
-                        files.Add(new DiscoveredFile
+                        files.Add( new DiscoveredFile
                         {
                             FileName = fileInfo.Name,
                             FilePath = fileInfo.FullName,
                             RelativePath = NormalizeRelativePath(Path.GetRelativePath(_sourcePath, fileInfo.FullName)),
                             FileSizeInBytes = fileInfo.Length,
-                            LastModifiedUtc = fileInfo.LastWriteTimeUtc,
-                            ContentHash = ComputeSha256(fileInfo.FullName)
+                            ContentHash = ComputeSha256(fileInfo.FullName),
+                            LastModifiedUtc = lastAccess
                         });
+
                     }
                     catch (IOException ex)
                     {
-                        Console.WriteLine($" ! Skipping '{filePath}': {ex.Message}");
+                        Log.Warning(ex, "Skipping file {FilePath} because it could not be read.", filePath);
                     }
                     catch (UnauthorizedAccessException ex)
                     {
-                        Console.WriteLine($" ! Skipping '{filePath}': {ex.Message}");
+                        Log.Warning(ex, "Skipping file {FilePath} because access was denied.", filePath);
                     }
                 }
 
@@ -85,11 +98,11 @@ namespace KumiIncrementalbackUp.Services
             }
             catch (IOException ex)
             {
-                Console.WriteLine($" ! Could not read files in '{directoryPath}': {ex.Message}");
+                Log.Warning(ex, "Could not read files in directory {DirectoryPath}.", directoryPath);
             }
             catch (UnauthorizedAccessException ex)
             {
-                Console.WriteLine($" ! Could not read files in '{directoryPath}': {ex.Message}");
+                Log.Warning(ex, "Could not read files in directory {DirectoryPath} because access was denied.", directoryPath);
             }
 
             foreach (string file in files)
@@ -104,11 +117,11 @@ namespace KumiIncrementalbackUp.Services
             }
             catch (IOException ex)
             {
-                Console.WriteLine($" ! Could not read directories in '{directoryPath}': {ex.Message}");
+                Log.Warning(ex, "Could not read subdirectories in directory {DirectoryPath}.", directoryPath);
             }
             catch (UnauthorizedAccessException ex)
             {
-                Console.WriteLine($" ! Could not read directories in '{directoryPath}': {ex.Message}");
+                Log.Warning(ex, "Could not read subdirectories in directory {DirectoryPath} because access was denied.", directoryPath);
             }
 
             foreach (string directory in directories)
@@ -124,12 +137,12 @@ namespace KumiIncrementalbackUp.Services
                 }
                 catch (IOException ex)
                 {
-                    Console.WriteLine($" ! Skipping directory '{directory}': {ex.Message}");
+                    Log.Warning(ex, "Skipping directory {DirectoryPath} because it could not be read.", directory);
                     continue;
                 }
                 catch (UnauthorizedAccessException ex)
                 {
-                    Console.WriteLine($" ! Skipping directory '{directory}': {ex.Message}");
+                    Log.Warning(ex, "Skipping directory {DirectoryPath} because access was denied.", directory);
                     continue;
                 }
 

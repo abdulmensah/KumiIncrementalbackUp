@@ -40,7 +40,6 @@ namespace KumiIncrementalbackUp
                     eventArgs.Cancel = true;
                     shutdown.Cancel();
                     Log.Warning("Shutdown requested. Waiting for the current backup step to stop.");
-                    Console.WriteLine("\nShutdown requested. Waiting for the current backup step to stop...");
                 };
 
                 try
@@ -57,13 +56,11 @@ namespace KumiIncrementalbackUp
                 catch (OperationCanceledException)
                 {
                     Log.Information("Backup scheduler stopped.");
-                    Console.WriteLine("Backup scheduler stopped.");
                 }
             }
             catch (Exception ex)
             {
                 Log.Fatal(ex, "Backup application terminated unexpectedly.");
-                Console.WriteLine($"\nFatal Error: {ex.Message}");
             }
             finally
             {
@@ -74,20 +71,17 @@ namespace KumiIncrementalbackUp
         private static async Task RunScheduledBackupsAsync(BackupAppSettings settings, BackupScheduleOptions scheduleOptions, CancellationToken cancellationToken)
         {
             Log.Information("Backup scheduler enabled. Interval: {Interval}.", scheduleOptions.Interval);
-            Console.WriteLine($"Backup scheduler enabled. Interval: {scheduleOptions.Interval}.");
-            Console.WriteLine("Press Ctrl+C to stop the scheduler.\n");
+            Log.Information("Press Ctrl+C to stop the scheduler.");
 
             while (!cancellationToken.IsCancellationRequested)
             {
                 DateTimeOffset startedAt = DateTimeOffset.Now;
                 Log.Information("Scheduled backup started at {StartedAt}.", startedAt);
-                Console.WriteLine($"Scheduled backup started at {startedAt:yyyy-MM-dd HH:mm:ss zzz}.");
 
                 await RunBackupJobAsync(settings, cancellationToken);
 
                 DateTimeOffset nextRun = DateTimeOffset.Now.Add(scheduleOptions.Interval);
                 Log.Information("Next backup scheduled for {NextRun}.", nextRun);
-                Console.WriteLine($"Next backup scheduled for {nextRun:yyyy-MM-dd HH:mm:ss zzz}.\n");
 
                 using var timer = new PeriodicTimer(scheduleOptions.Interval);
                 await timer.WaitForNextTickAsync(cancellationToken);
@@ -97,12 +91,11 @@ namespace KumiIncrementalbackUp
         private static async Task RunBackupJobAsync(BackupAppSettings settings, CancellationToken cancellationToken)
         {
             DateTimeOffset jobStartedAt = DateTimeOffset.UtcNow;
-            Console.WriteLine("=== Azure File Share Backup with USB 3 Source ===\n");
+            Log.Information("Azure File Share backup with USB source started.");
 
             try
             {
                 // Step 0: Detect and list USB devices
-                Console.WriteLine("Step 0: Detecting USB devices...\n");
                 string sourceUsbDrive = settings.Backup.SourceUsbDrive;
                 Log.Information("Backup job initializing for source device {SourceUsbDevice}.", sourceUsbDrive);
 
@@ -125,10 +118,9 @@ namespace KumiIncrementalbackUp
                 // Create unique Job ID
                 string currentJobId = $"job-{Guid.NewGuid().ToString().Substring(0, 8)}";
                 Log.Information("Backup job {JobId} started for source device {SourceUsbDevice}.", currentJobId, sourceUsbDrive);
-                Console.WriteLine($"Backup Job ID: {currentJobId}\n");
 
                 // Step 1: Discover files from USB device
-                Console.WriteLine("Step 1: Discovering files from USB device...\n");
+                Log.Information("Discovering files from source device for backup job {JobId}.", currentJobId);
                 var fileDiscoveryService = new FileDiscoveryService(sourceUsbDrive);
                 var filesToBackup = await fileDiscoveryService.DiscoverFilesAsync();
                 cancellationToken.ThrowIfCancellationRequested();
@@ -136,19 +128,16 @@ namespace KumiIncrementalbackUp
                 if (filesToBackup.Count == 0)
                 {
                     Log.Warning("Backup job {JobId} found no files matching the backup criteria.", currentJobId);
-                    Console.WriteLine("✗ No files found matching the backup criteria.\n");
                     return;
                 }
 
                 Log.Information("Backup job {JobId} discovered {FileCount} files.", currentJobId, filesToBackup.Count);
-                Console.WriteLine($"\n✓ Discovered {filesToBackup.Count} files to backup\n");
 
                 // Calculate total size
                 long totalSizeToBackup = filesToBackup.Sum(f => f.FileSizeInBytes);
-                Log.Information("Backup job {JobId} discovered {TotalSizeBytes} bytes to evaluate.", currentJobId, totalSizeToBackup);
-                Console.WriteLine($"Total data size: {FormatFileSize(totalSizeToBackup)}\n");
+                Log.Information("Backup job {JobId} discovered {TotalSizeBytes} bytes ({TotalSize}) to evaluate.", currentJobId, totalSizeToBackup, FormatFileSize(totalSizeToBackup));
 
-                Console.WriteLine("Step 2: Evaluating files for incremental backup...\n");
+                Log.Information("Evaluating files for incremental backup for job {JobId}.", currentJobId);
                 var filesSelectedForBackup = new List<DiscoveredFile>();
                 int skippedCount = 0;
 
@@ -156,7 +145,7 @@ namespace KumiIncrementalbackUp
                 {
                     cancellationToken.ThrowIfCancellationRequested();
 
-                    await WriteAuditEventAsync(container, currentJobId, sourceUsbDrive, fileInfo, "Discovered", "File discovered during source scan.");
+                    LogAuditEvent(currentJobId, sourceUsbDrive, fileInfo, "Discovered", "File discovered during source scan.");
                     FileBackupState? previousBackup = await GetLatestCompletedBackupAsync(container, sourceUsbDrive, fileInfo.RelativePath);
 
                     bool isUnchanged = previousBackup is not null
@@ -187,20 +176,18 @@ namespace KumiIncrementalbackUp
                     if (isUnchanged)
                     {
                         skippedCount++;
-                        await WriteAuditEventAsync(container, currentJobId, sourceUsbDrive, fileInfo, "Skipped", "File is unchanged from the latest completed backup.", previousBackup);
-                        Console.WriteLine($" → {fileInfo.RelativePath} ({FormatFileSize(fileInfo.FileSizeInBytes)}) [Skipped unchanged]");
+                        LogAuditEvent(currentJobId, sourceUsbDrive, fileInfo, "Skipped", "File is unchanged from the latest completed backup.", previousBackup);
                     }
                     else
                     {
                         filesSelectedForBackup.Add(fileInfo);
                         string action = previousBackup is null ? "new file" : "modified file";
-                        await WriteAuditEventAsync(container, currentJobId, sourceUsbDrive, fileInfo, "Pending", $"Queued as {action}.", previousBackup);
-                        Console.WriteLine($" → {fileInfo.RelativePath} ({FormatFileSize(fileInfo.FileSizeInBytes)}) [Pending: {action}]");
+                        LogAuditEvent(currentJobId, sourceUsbDrive, fileInfo, "Pending", $"Queued as {action}.", previousBackup);
                     }
                 }
 
                 // Step 3: Process files and upload to Azure File Share
-                Console.WriteLine("\nStep 3: Uploading files to Azure File Share...\n");
+                Log.Information("Uploading {FileCount} selected files to Azure File Share for job {JobId}.", filesSelectedForBackup.Count, currentJobId);
                 int successCount = 0;
                 int failureCount = 0;
                 long totalBackedUp = 0;
@@ -211,7 +198,7 @@ namespace KumiIncrementalbackUp
 
                     string fileId = CreateDocumentId("state", $"{currentJobId}|{fileInfo.RelativePath}");
 
-                    Console.WriteLine($"\nProcessing: {fileInfo.RelativePath}");
+                    Log.Information("Processing file {RelativePath} for backup job {JobId}.", fileInfo.RelativePath, currentJobId);
 
                     try
                     {
@@ -222,13 +209,13 @@ namespace KumiIncrementalbackUp
                             PatchOperation.Replace("/lastUpdated", DateTimeOffset.UtcNow)
                         };
                         await container.PatchItemAsync<FileBackupState>(fileId, new PartitionKey(currentJobId), processingPatches);
-                        await WriteAuditEventAsync(container, currentJobId, sourceUsbDrive, fileInfo, "Processing", "Upload started.");
+                        LogAuditEvent(currentJobId, sourceUsbDrive, fileInfo, "Processing", "Upload started.");
 
                         // Upload to Azure File Share
+                        var loggedProgressMilestones = new HashSet<int>();
                         var uploadResult = await fileShareService.UploadFileAsync(fileInfo.FilePath, fileInfo.RelativePath, async (uploaded, total) =>
                         {
                             int percentComplete = total == 0 ? 100 : (int)((uploaded * 100) / total);
-                            Console.Write($"\r → Progress: {uploaded}/{total} bytes ({percentComplete}%)");
 
                             // Update progress in Cosmos DB (less frequent to avoid throttling)
                             if (percentComplete % 10 == 0)
@@ -239,6 +226,18 @@ namespace KumiIncrementalbackUp
                                     PatchOperation.Replace("/lastUpdated", DateTimeOffset.UtcNow)
                                 };
                                 await container.PatchItemAsync<FileBackupState>(fileId, new PartitionKey(currentJobId), progressPatches);
+                            }
+
+                            int progressMilestone = Math.Min(100, (percentComplete / 10) * 10);
+                            if (progressMilestone > 0 && loggedProgressMilestones.Add(progressMilestone))
+                            {
+                                Log.Information(
+                                    "Upload progress for file {RelativePath} in job {JobId}: {PercentComplete}% ({UploadedBytes}/{TotalBytes} bytes).",
+                                    fileInfo.RelativePath,
+                                    currentJobId,
+                                    progressMilestone,
+                                    uploaded,
+                                    total);
                             }
                         });
 
@@ -253,8 +252,7 @@ namespace KumiIncrementalbackUp
                                 PatchOperation.Replace("/lastUpdated", DateTimeOffset.UtcNow)
                             };
                             await container.PatchItemAsync<FileBackupState>(fileId, new PartitionKey(currentJobId), completedPatches);
-                            await WriteAuditEventAsync(container, currentJobId, sourceUsbDrive, fileInfo, "Completed", "Upload completed successfully.", remoteFileSharePath: uploadResult.RemoteFilePath, bytesTransferred: fileInfo.FileSizeInBytes);
-                            Console.WriteLine($"\n ✓ Successfully uploaded to {uploadResult.RemoteFilePath}");
+                            LogAuditEvent(currentJobId, sourceUsbDrive, fileInfo, "Completed", "Upload completed successfully.", remoteFileSharePath: uploadResult.RemoteFilePath, bytesTransferred: fileInfo.FileSizeInBytes);
                             successCount++;
                             totalBackedUp += fileInfo.FileSizeInBytes;
                         }
@@ -272,42 +270,29 @@ namespace KumiIncrementalbackUp
                             PatchOperation.Replace("/lastUpdated", DateTimeOffset.UtcNow)
                         };
                         await container.PatchItemAsync<FileBackupState>(fileId, new PartitionKey(currentJobId), failedPatches);
-                        await WriteAuditEventAsync(container, currentJobId, sourceUsbDrive, fileInfo, "Failed", ex.Message);
-                        Console.WriteLine($"\n ✗ Failed: {ex.Message}");
+                        LogAuditEvent(currentJobId, sourceUsbDrive, fileInfo, "Failed", ex.Message);
                         failureCount++;
                     }
                 }
 
                 // Step 5: Generate final report
-                Console.WriteLine("\n\n═══════════════════════════════════════════════════════");
-                Console.WriteLine("BACKUP JOB SUMMARY");
-                Console.WriteLine("═══════════════════════════════════════════════════════");
-                Console.WriteLine($"Job ID: {currentJobId}");
-                Console.WriteLine($"Source USB Drive: {sourceUsbDrive}");
-                Console.WriteLine($"Total Files: {filesToBackup.Count}");
-                Console.WriteLine($"Skipped Unchanged: {skippedCount}");
-                Console.WriteLine($"Uploaded/Changed: {filesSelectedForBackup.Count}");
-                Console.WriteLine($"Successful: {successCount}");
-                Console.WriteLine($"Failed: {failureCount}");
-                Console.WriteLine($"Total Data Backed Up: {FormatFileSize(totalBackedUp)}");
-                Console.WriteLine($"Upload Success Rate: {(filesSelectedForBackup.Count == 0 ? 100 : successCount * 100.0 / filesSelectedForBackup.Count):F1}%");
-                Console.WriteLine("═══════════════════════════════════════════════════════\n");
                 Log.Information(
-                    "Backup job {JobId} completed. TotalFiles={TotalFiles}, SkippedUnchanged={SkippedUnchanged}, UploadedOrChanged={UploadedOrChanged}, Successful={Successful}, Failed={Failed}, TotalBackedUpBytes={TotalBackedUpBytes}, DurationMs={DurationMs}.",
+                    "Backup job {JobId} completed. SourceUsbDevice={SourceUsbDevice}, TotalFiles={TotalFiles}, SkippedUnchanged={SkippedUnchanged}, UploadedOrChanged={UploadedOrChanged}, Successful={Successful}, Failed={Failed}, TotalBackedUpBytes={TotalBackedUpBytes}, TotalBackedUp={TotalBackedUp}, UploadSuccessRate={UploadSuccessRate}, DurationMs={DurationMs}.",
                     currentJobId,
+                    sourceUsbDrive,
                     filesToBackup.Count,
                     skippedCount,
                     filesSelectedForBackup.Count,
                     successCount,
                     failureCount,
                     totalBackedUp,
+                    FormatFileSize(totalBackedUp),
+                    filesSelectedForBackup.Count == 0 ? 100 : successCount * 100.0 / filesSelectedForBackup.Count,
                     (DateTimeOffset.UtcNow - jobStartedAt).TotalMilliseconds);
             }
             catch (Exception ex)
             {
                 Log.Fatal(ex, "Backup job failed after {DurationMs} ms.", (DateTimeOffset.UtcNow - jobStartedAt).TotalMilliseconds);
-                Console.WriteLine($"\n✗ Fatal Error: {ex.Message}");
-                Console.WriteLine($"Stack Trace: {ex.StackTrace}");
             }
         }
 
@@ -332,7 +317,7 @@ namespace KumiIncrementalbackUp
         private static async Task<FileBackupState?> GetLatestCompletedBackupAsync(Container container, string sourceUsbDevice, string relativePath)
         {
             var query = new QueryDefinition(
-                "SELECT TOP 1 * FROM c WHERE (NOT IS_DEFINED(c.documentType) OR c.documentType != 'AuditEvent') AND c.sourceUsbDevice = @sourceUsbDevice AND c.relativePath = @relativePath AND c.currentState = 'Completed' ORDER BY c.lastUpdated DESC")
+                "SELECT TOP 1 * FROM c WHERE c.documentType = 'FileState' AND c.sourceUsbDevice = @sourceUsbDevice AND c.relativePath = @relativePath AND c.currentState = 'Completed' ORDER BY c.lastUpdated DESC")
                 .WithParameter("@sourceUsbDevice", sourceUsbDevice)
                 .WithParameter("@relativePath", relativePath);
 
@@ -356,8 +341,7 @@ namespace KumiIncrementalbackUp
             return null;
         }
 
-        private static async Task WriteAuditEventAsync(
-            Container container,
+        private static void LogAuditEvent(
             string jobId,
             string sourceUsbDevice,
             DiscoveredFile fileInfo,
@@ -396,8 +380,6 @@ namespace KumiIncrementalbackUp
                 .ForContext("BytesTransferred", auditEvent.BytesTransferred)
                 .ForContext("DocumentType", auditEvent.DocumentType)
                 .Write(GetAuditLogLevel(eventType), "Backup audit event {AuditEventType}: {AuditMessage}", auditEvent.EventType, auditEvent.Message);
-
-            await container.CreateItemAsync(auditEvent, new PartitionKey(jobId));
         }
 
         private static string CreateDocumentId(string prefix, string value)
