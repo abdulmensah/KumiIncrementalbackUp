@@ -363,3 +363,4 @@ MigrationBackup/
 FodyWeavers.xsd
 /KumiIncrementalbackUp/appsettings.json
 /KumiIncrementalbackUp/appsettings.Development.json
+/KumiIncrementalbackUp/Packaging/dist
